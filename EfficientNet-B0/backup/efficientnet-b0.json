@@ -1,0 +1,7 @@
+{
+    "nn_config": {
+        "output_format" : "raw",
+        "input_size": "224x224"
+    },
+    "handler": "main.py"
+}
