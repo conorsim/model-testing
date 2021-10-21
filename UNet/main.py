@@ -21,6 +21,8 @@ class FPSHandler:
         self.ticks = {}
         self.ticks_cnt = {}
 
+        self.storage = []
+
     def next_iter(self):
         if not args.camera:
             frame_delay = 1.0 / self.framerate
@@ -44,15 +46,26 @@ class FPSHandler:
             return 0
 
     def fps(self):
-        return self.frame_cnt / (self.timestamp - self.start)
+        fps = self.frame_cnt / (self.timestamp - self.start)
+        self.storage.append(fps)
+        if len(self.storage) > 25:
+            self.storage.pop(0)
+        return fps
+
+    def fps_average(self):
+        if len(self.storage) < 25:
+            return 0, 0
+
+        return np.mean(self.storage), np.std(self.storage)
+
 
 
 # Get Argument First
 parser = argparse.ArgumentParser()
-parser.add_argument('-nd', '--no-debug', action="store_true", help="Prevent debug output")
 parser.add_argument('-cam', '--camera', action="store_true", help="Use DepthAI 4K RGB camera for inference (conflicts with -vid)")
 parser.add_argument('-vid', '--video', type=str, help="Path to video file to be used for inference (conflicts with -cam)")
 parser.add_argument('-s', '--shaves', type=int, default=6, help="Number of shaves to use for blob")
+parser.add_argument('-f', '--fps', action="store_true", help="Compute FPS only without post-processing")
 args = parser.parse_args()
 
 
@@ -65,7 +78,6 @@ args = parser.parse_args()
 if not args.camera and not args.video:
     raise RuntimeError("No source selected. Please use either \"-cam\" to use RGB camera as a source or \"-vid <path>\" to run on video")
 
-debug = not args.no_debug
 camera = not args.video
 labels = class_names()
 
@@ -158,6 +170,7 @@ with dai.Device(pipeline) as device:
     result = None
 
     while should_run():
+
         read_correctly, frame = get_frame()
 
         if not read_correctly:
@@ -172,6 +185,13 @@ with dai.Device(pipeline) as device:
 
         in_nn = q_nn.get()
 
+        if args.fps:
+            # skip inference if FPS only
+            print(f"FPS: {fps.fps()}")
+            print(f"{fps.fps_average()}")
+            continue
+
+
         output = np.array(in_nn.getFirstLayerFp16()).reshape(12, 368, 480)
         result = get_mask(output, 12)
 
@@ -179,7 +199,7 @@ with dai.Device(pipeline) as device:
         frame_main = show_overlay(frame_main, result)
 
         cv2.putText(frame_main, "Fps: {:.2f}".format(fps.fps()), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
-
+        print(fps.fps_average())
         cv2.imshow("rgb", cv2.resize(frame_main, (480, 368)))
 
         if cv2.waitKey(1) == ord('q'):
