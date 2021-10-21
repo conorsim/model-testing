@@ -8,64 +8,15 @@ import cv2
 import depthai as dai
 import numpy as np
 from classes import class_names
+from depthai_sdk import FPSHandler
 
 import time
-
-class FPSHandler:
-    def __init__(self, cap=None):
-        self.timestamp = time.time()
-        self.start = time.time()
-        self.framerate = cap.get(cv2.CAP_PROP_FPS) if cap is not None else None
-
-        self.frame_cnt = 0
-        self.ticks = {}
-        self.ticks_cnt = {}
-
-        self.storage = []
-
-    def next_iter(self):
-        if not args.camera:
-            frame_delay = 1.0 / self.framerate
-            delay = (self.timestamp + frame_delay) - time.time()
-            if delay > 0:
-                time.sleep(delay)
-        self.timestamp = time.time()
-        self.frame_cnt += 1
-
-    def tick(self, name):
-        if name in self.ticks:
-            self.ticks_cnt[name] += 1
-        else:
-            self.ticks[name] = time.time()
-            self.ticks_cnt[name] = 0
-
-    def tick_fps(self, name):
-        if name in self.ticks:
-            return self.ticks_cnt[name] / (time.time() - self.ticks[name])
-        else:
-            return 0
-
-    def fps(self):
-        fps = self.frame_cnt / (self.timestamp - self.start)
-        self.storage.append(fps)
-        if len(self.storage) > 25:
-            self.storage.pop(0)
-        return fps
-
-    def fps_average(self):
-        if len(self.storage) < 25:
-            return 0, 0
-
-        return np.mean(self.storage), np.std(self.storage)
-
-
 
 # Get Argument First
 parser = argparse.ArgumentParser()
 parser.add_argument('-cam', '--camera', action="store_true", help="Use DepthAI 4K RGB camera for inference (conflicts with -vid)")
 parser.add_argument('-vid', '--video', type=str, help="Path to video file to be used for inference (conflicts with -cam)")
 parser.add_argument('-s', '--shaves', type=int, default=6, help="Number of shaves to use for blob")
-parser.add_argument('-f', '--fps', action="store_true", help="Compute FPS only without post-processing")
 args = parser.parse_args()
 
 
@@ -143,10 +94,10 @@ with dai.Device(pipeline) as device:
     # Output queues will be used to get the rgb frames and nn data from the outputs defined above
     if camera:
         q_rgb = device.getOutputQueue(name="rgb", maxSize=1, blocking=True)
-        fps = FPSHandler()
+        fps = FPSHandler(maxTicks=2)
     else:
         cap = cv2.VideoCapture(str(Path(args.video).resolve().absolute()))
-        fps = FPSHandler(cap)
+        fps = FPSHandler(cap, maxTicks=2)
 
         detection_in = device.getInputQueue("in_nn")
     q_nn = device.getOutputQueue(name="nn", maxSize=1, blocking=True)
@@ -176,7 +127,7 @@ with dai.Device(pipeline) as device:
         if not read_correctly:
             break
 
-        fps.next_iter()
+        fps.tick("test")
 
         if not camera:
             nn_data = dai.NNData()
@@ -185,21 +136,14 @@ with dai.Device(pipeline) as device:
 
         in_nn = q_nn.get()
 
-        if args.fps:
-            # skip inference if FPS only
-            print(f"FPS: {fps.fps()}")
-            print(f"{fps.fps_average()}")
-            continue
-
-
         output = np.array(in_nn.getFirstLayerFp16()).reshape(12, 368, 480)
         result = get_mask(output, 12)
 
         frame_main = frame.copy()
         frame_main = show_overlay(frame_main, result)
 
-        cv2.putText(frame_main, "Fps: {:.2f}".format(fps.fps()), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
-        print(fps.fps_average())
+        print(fps.tickFps("test"))
+        #cv2.putText(frame_main, "Fps: {:.2f}".format(fps.tickFps("test")), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
         cv2.imshow("rgb", cv2.resize(frame_main, (480, 368)))
 
         if cv2.waitKey(1) == ord('q'):
