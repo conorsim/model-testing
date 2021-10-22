@@ -88,16 +88,17 @@ def to_planar(arr: np.ndarray, shape: tuple) -> np.ndarray:
         return resized.transpose(2, 0, 1)
 
 
+fpses = []
 # Pipeline defined, now the device is assigned and pipeline is started
 with dai.Device(pipeline) as device:
 
     # Output queues will be used to get the rgb frames and nn data from the outputs defined above
     if camera:
         q_rgb = device.getOutputQueue(name="rgb", maxSize=1, blocking=True)
-        fps = FPSHandler(maxTicks=2)
+        fps_handler = FPSHandler(maxTicks=2)
     else:
         cap = cv2.VideoCapture(str(Path(args.video).resolve().absolute()))
-        fps = FPSHandler(cap, maxTicks=2)
+        fps_handler = FPSHandler(cap, maxTicks=2)
 
         detection_in = device.getInputQueue("in_nn")
     q_nn = device.getOutputQueue(name="nn", maxSize=1, blocking=True)
@@ -127,7 +128,7 @@ with dai.Device(pipeline) as device:
         if not read_correctly:
             break
 
-        fps.tick("test")
+        fps_handler.tick("test")
 
         if not camera:
             nn_data = dai.NNData()
@@ -142,9 +143,17 @@ with dai.Device(pipeline) as device:
         frame_main = frame.copy()
         frame_main = show_overlay(frame_main, result)
 
-        print(fps.tickFps("test"))
-        #cv2.putText(frame_main, "Fps: {:.2f}".format(fps.tickFps("test")), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
+        fps = fps_handler.tickFps("test")
+        cv2.putText(frame_main, "Fps: {:.2f}".format(fps), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
         cv2.imshow("rgb", cv2.resize(frame_main, (480, 368)))
+
+        fpses.append(fps)
+
+        if len(fpses) > 30:
+            break
 
         if cv2.waitKey(1) == ord('q'):
             break
+
+print(f"Mean: {np.mean(fpses[5:])}")
+print(f"Std: {np.std(fpses[5:])}")
