@@ -138,7 +138,7 @@ with dai.Device(pipeline) as device:
             x1, y1, x2, y2 = [int(c) for c in box[3:7]*300]
             color = (255,0,0)
             cv2.rectangle(frame_main, (x1,y1), (x2,y2), color, 2)
-            cv2.putText(frame_main, labels[int(box[1])], (x1,y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color=color)
+            cv2.putText(frame_main, f'{labels[int(box[1])]} {round(100*box[2], 2)}%', (x1,y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color=color)
 
         print(fps.tickFps("test"))
         #cv2.putText(frame_main, "Fps: {:.2f}".format(fps.tickFps("test")), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
