@@ -1,53 +1,16 @@
-#!/usr/bin/env python3
 import argparse
+import threading
 from pathlib import Path
-import sys
-
 import blobconverter
+
+from depthai_sdk.managers import PipelineManager, NNetManager, BlobManager, PreviewManager
+from depthai_sdk import FPSHandler, Previews, getDeviceInfo, downloadYTVideo
+
+from pose import getKeypoints, getValidPairs, getPersonwiseKeypoints
 import cv2
 import depthai as dai
 import numpy as np
-from classes import class_names
 
-import time
-
-class FPSHandler:
-    def __init__(self, cap=None):
-        self.timestamp = time.time()
-        self.start = time.time()
-        self.framerate = cap.get(cv2.CAP_PROP_FPS) if cap is not None else None
-
-        self.frame_cnt = 0
-        self.ticks = {}
-        self.ticks_cnt = {}
-
-    def next_iter(self):
-        if not args.camera:
-            frame_delay = 1.0 / self.framerate
-            delay = (self.timestamp + frame_delay) - time.time()
-            if delay > 0:
-                time.sleep(delay)
-        self.timestamp = time.time()
-        self.frame_cnt += 1
-
-    def tick(self, name):
-        if name in self.ticks:
-            self.ticks_cnt[name] += 1
-        else:
-            self.ticks[name] = time.time()
-            self.ticks_cnt[name] = 0
-
-    def tick_fps(self, name):
-        if name in self.ticks:
-            return self.ticks_cnt[name] / (time.time() - self.ticks[name])
-        else:
-            return 0
-
-    def fps(self):
-        return self.frame_cnt / (self.timestamp - self.start)
-
-
-# Get Argument First
 parser = argparse.ArgumentParser()
 parser.add_argument('-nd', '--no-debug', action="store_true", help="Prevent debug output")
 parser.add_argument('-cam', '--camera', action="store_true", help="Use DepthAI 4K RGB camera for inference (conflicts with -vid)")
@@ -55,142 +18,157 @@ parser.add_argument('-vid', '--video', type=str, help="Path to video file to be 
 parser.add_argument('-s', '--shaves', type=int, default=6, help="Number of shaves to use for blob")
 args = parser.parse_args()
 
-
-
-# NOTE: video must be of size 224 x 224. We will resize this on the
-# host, but you could also use ImageManip node to do it on device
-
-# Link video in with the detection network
-
 if not args.camera and not args.video:
     raise RuntimeError("No source selected. Please use either \"-cam\" to use RGB camera as a source or \"-vid <path>\" to run on video")
 
 debug = not args.no_debug
-camera = not args.video
-labels = class_names()
+device_info = getDeviceInfo()
+
+# if args.camera:
+#     blob_path = "models/human-pose-estimation-0001_openvino_2021.2_6shave.blob"
+# else:
+#     blob_path = "models/human-pose-estimation-0001_openvino_2021.2_8shave.blob"
+#     if str(args.video).startswith('https'):
+#         args.video = downloadYTVideo(str(args.video))
+#         print("Youtube video downloaded.")
+#     if not Path(args.video).exists():
+#         raise ValueError("Path {} does not exists!".format(args.video))
 
 
-# Start defining a pipeline
-pipeline = dai.Pipeline()
+colors = [[0, 100, 255], [0, 100, 255], [0, 255, 255], [0, 100, 255], [0, 255, 255], [0, 100, 255], [0, 255, 0],
+          [255, 200, 100], [255, 0, 255], [0, 255, 0], [255, 200, 100], [255, 0, 255], [0, 0, 255], [255, 0, 0],
+          [200, 200, 0], [255, 0, 0], [200, 200, 0], [0, 0, 0]]
+POSE_PAIRS = [[1, 2], [1, 5], [2, 3], [3, 4], [5, 6], [6, 7], [1, 8], [8, 9], [9, 10], [1, 11], [11, 12], [12, 13],
+              [1, 0], [0, 14], [14, 16], [0, 15], [15, 17], [2, 17], [5, 16]]
 
-# NeuralNetwork
-print("Creating Neural Network...")
-detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath(str(blobconverter.from_zoo(name="human-pose-estimation-0001", shaves=args.shaves)))
+running = True
+pose = None
+keypoints_list = None
+detected_keypoints = None
+personwiseKeypoints = None
 
-if camera:
-    print("Creating Color Camera...")
-    cam_rgb = pipeline.createColorCamera()
-    cam_rgb.setPreviewSize(456,256)
-    cam_rgb.setInterleaved(False)
-    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
-    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
+nm = NNetManager(inputSize=(456, 256))
+pm = PipelineManager()
+pm.setNnManager(nm)
 
-    cam_xout = pipeline.createXLinkOut()
-    cam_xout.setStreamName("rgb")
-    cam_rgb.preview.link(cam_xout.input)
-    cam_rgb.preview.link(detection_nn.input)
+if args.camera:
+    fps = FPSHandler(maxTicks=2)
+    pm.createColorCam(previewSize=(456, 256), xout=True)
 else:
-    face_in = pipeline.createXLinkIn()
-    face_in.setStreamName("in_nn")
-    face_in.out.link(detection_nn.input)
+    cap = cv2.VideoCapture(str(Path(args.video).resolve().absolute()))
+    fps = FPSHandler(cap, maxTicks=2)
 
-# Create outputs
-xout_nn = pipeline.createXLinkOut()
-xout_nn.setStreamName("nn")
-detection_nn.out.link(xout_nn.input)
+nn = nm.createNN(pm.pipeline, pm.nodes, source=Previews.color.name if args.camera else "host", blobPath=Path(str(blobconverter.from_zoo(name="human-pose-estimation-0001", shaves=args.shaves))), fullFov=True)
+# nn.setBlobPath(str(blobconverter.from_zoo(name="efficientnet-b0", shaves=args.shaves)))
+pm.addNn(nn=nn)
 
-frame = None
-bboxes = []
+def decode_thread(in_queue):
+    global keypoints_list, detected_keypoints, personwiseKeypoints
+
+    while running:
+        try:
+            raw_in = in_queue.get()
+        except RuntimeError:
+            return
+        fps.tick('nn')
+        heatmaps = np.array(raw_in.getLayerFp16('Mconv7_stage2_L2')).reshape((1, 19, 32, 57))
+        pafs = np.array(raw_in.getLayerFp16('Mconv7_stage2_L1')).reshape((1, 38, 32, 57))
+        heatmaps = heatmaps.astype('float32')
+        pafs = pafs.astype('float32')
+        outputs = np.concatenate((heatmaps, pafs), axis=1)
+
+        new_keypoints = []
+        new_keypoints_list = np.zeros((0, 3))
+        keypoint_id = 0
+
+        for row in range(18):
+            probMap = outputs[0, row, :, :]
+            probMap = cv2.resize(probMap, nm.inputSize)  # (456, 256)
+            keypoints = getKeypoints(probMap, 0.3)
+            new_keypoints_list = np.vstack([new_keypoints_list, *keypoints])
+            keypoints_with_id = []
+
+            for i in range(len(keypoints)):
+                keypoints_with_id.append(keypoints[i] + (keypoint_id,))
+                keypoint_id += 1
+
+            new_keypoints.append(keypoints_with_id)
+
+        valid_pairs, invalid_pairs = getValidPairs(outputs, w=nm.inputSize[0], h=nm.inputSize[1], detected_keypoints=new_keypoints)
+        newPersonwiseKeypoints = getPersonwiseKeypoints(valid_pairs, invalid_pairs, new_keypoints_list)
+
+        print(fps.tickFps("nn"))
+
+        detected_keypoints, keypoints_list, personwiseKeypoints = (new_keypoints, new_keypoints_list, newPersonwiseKeypoints)
 
 
-def to_tensor_result(packet):
-    return {
-        tensor.name: np.array(packet.getLayerFp16(tensor.name)).reshape(tensor.dims)
-        for tensor in packet.getRaw().tensors
-    }
+def show(frame):
+    global keypoints_list, detected_keypoints, personwiseKeypoints, nm
+
+    if keypoints_list is not None and detected_keypoints is not None and personwiseKeypoints is not None:
+        scale_factor = frame.shape[0] / nm.inputSize[1]
+        offset_w = int(frame.shape[1] - nm.inputSize[0] * scale_factor) // 2
+
+        def scale(point):
+            return int(point[0] * scale_factor) + offset_w, int(point[1] * scale_factor)
+
+        for i in range(18):
+            for j in range(len(detected_keypoints[i])):
+                cv2.circle(frame, scale(detected_keypoints[i][j][0:2]), 5, colors[i], -1, cv2.LINE_AA)
+        for i in range(17):
+            for n in range(len(personwiseKeypoints)):
+                index = personwiseKeypoints[n][np.array(POSE_PAIRS[i])]
+                if -1 in index:
+                    continue
+                B = np.int32(keypoints_list[index.astype(int), 0])
+                A = np.int32(keypoints_list[index.astype(int), 1])
+                cv2.line(frame, scale((B[0], A[0])), scale((B[1], A[1])), colors[i], 3, cv2.LINE_AA)
 
 
-def softmax(x):
-    """Compute softmax values for each sets of scores in x."""
-    e_x = np.exp(x - np.max(x))
-    return e_x / e_x.sum(axis=0)
+print("Starting pipeline...")
+with dai.Device(pm.pipeline, device_info) as device:
+    if args.camera:
+        pv = PreviewManager(display=[Previews.color.name], nnSource=Previews.color.name, scale={"color": 0.37}, fpsHandler=fps)
+        pv.createQueues(device)
+    nm.createQueues(device)
+    seq_num = 1
 
-
-def to_planar(arr: np.ndarray, shape: tuple) -> np.ndarray:
-        resized = cv2.resize(arr, shape)
-        return resized.transpose(2, 0, 1)
-
-
-# Pipeline defined, now the device is assigned and pipeline is started
-with dai.Device(pipeline) as device:
-
-    # Output queues will be used to get the rgb frames and nn data from the outputs defined above
-    if camera:
-        q_rgb = device.getOutputQueue(name="rgb", maxSize=1, blocking=False)
-        fps = FPSHandler()
-    else:
-        cap = cv2.VideoCapture(str(Path(args.video).resolve().absolute()))
-        fps = FPSHandler(cap)
-
-        detection_in = device.getInputQueue("in_nn")
-    q_nn = device.getOutputQueue(name="nn", maxSize=1, blocking=False)
-
+    t = threading.Thread(target=decode_thread, args=(nm.outputQueue, ))
+    t.start()
 
     def should_run():
         return cap.isOpened() if args.video else True
 
 
-    def get_frame():
-        if camera:
-            in_rgb = q_rgb.get()
-            new_frame = np.array(in_rgb.getData()).reshape((3, in_rgb.getHeight(), in_rgb.getWidth())).transpose(1, 2, 0).astype(np.uint8)
-            new_frame = cv2.cvtColor(new_frame, cv2.COLOR_BGR2RGB)
-            return True, np.ascontiguousarray(new_frame)
-        else:
-            return cap.read()
+    try:
+        while should_run():
+            # fps.tick('test')
+            if args.camera:
+                pv.prepareFrames()
+                frame = pv.get(Previews.color.name)
+                if debug:
+                    show(frame)
+                    # cv2.putText(frame, f"RGB FPS: {round(fps.tickFps(Previews.color.name), 1)}", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0))
+                    # cv2.putText(frame, f"NN FPS:  {round(fps.tickFps('nn'), 1)}", (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0))
+                    pv.showFrames()
+            if not args.camera:
+                read_correctly, frame = cap.read()
 
+                if not read_correctly:
+                    break
 
+                nm.sendInputFrame(frame)
+                fps.tick('host')
 
-    result = None
-
-    while should_run():
-        read_correctly, frame = get_frame()
-
-        if not read_correctly:
-            break
-
-        fps.next_iter()
-
-        if not camera:
-            nn_data = dai.NNData()
-            nn_data.setLayer("input", to_planar(frame, (456, 256)))
-            detection_in.send(nn_data)
-
-        in_nn = q_nn.tryGet()
-
-        if in_nn is not None:
-            data = softmax(in_nn.getFirstLayerFp16())
-            result_conf = np.max(data)
-            if result_conf > 0.2:
-                result = {
-                    "name": labels[np.argmax(data)],
-                    "conf": round(100 * result_conf, 2)
-                }
-            else:
-                result = None
-
-        if debug:
-            frame_main = frame.copy()
-            if result is not None:
-                cv2.putText(frame_main, "{}".format(result["name"]), (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0))
-                cv2.putText(frame_main, "Confidence: {}%".format(result["conf"]), (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0))
-            cv2.putText(frame_main, "Fps: {:.2f}".format(fps.fps()), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
-
-            cv2.imshow("rgb", cv2.resize(frame_main, (400, 400)))
-
-            if cv2.waitKey(1) == ord('q'):
+            key = cv2.waitKey(1)
+            if key == ord('q'):
                 break
-        elif result is not None:
-            print("{} ({}%)".format(result["name"], result["conf"]))
+
+    except KeyboardInterrupt:
+        pass
+
+    running = False
+
+t.join()
+if not args.camera:
+    cap.release()
