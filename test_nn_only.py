@@ -16,6 +16,7 @@ parser.add_argument('-s', '--shaves', type=int, default=6, help="Number of shave
 parser.add_argument('-nn', '--model_name', type=str, default=None, help="Name of the model in the zoo")
 parser.add_argument('-zoo', '--zoo_type', type=str, default=None, help="Zoo type")
 parser.add_argument('-shape', '--input_shape', type=int, nargs='+', help="List of ints", required=True)
+parser.add_argument('-fp16', '--fp16', action="store_true", help="Input must be FP16")
 args = parser.parse_args()
 
 print("Parsed arguments")
@@ -28,7 +29,7 @@ pipeline = dai.Pipeline()
 # NeuralNetwork
 print("Creating Neural Network...")
 detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath(str(blobconverter.from_zoo(name=args.model_name, zoo_type=args.zoo_type, shaves=args.shaves)))
+detection_nn.setBlobPath(str(blobconverter.from_zoo(name=args.model_name, zoo_type=args.zoo_type, shaves=args.shaves, use_cache = False)))
 detection_nn.setNumInferenceThreads(1)
 
 nn_in = pipeline.createXLinkIn()
@@ -50,10 +51,15 @@ with dai.Device(pipeline) as device:
 
     while len(fps_storage) <= 30:
 
-        frame = np.random.randint(256, size=args.input_shape, dtype=int)
-
-        nn_data = dai.NNData()
-        nn_data.setLayer("input", frame)
+        if not args.fp16:
+            frame = np.random.randint(256, size=args.input_shape, dtype=int)
+            nn_data = dai.NNData()
+            nn_data.setLayer("input", frame)
+        else:
+            frame = np.random.rand(*args.input_shape)
+            frame = frame.astype(np.float16).flatten().tolist()
+            nn_data = dai.Buffer()
+            nn_data.setData(frame)
 
         start = time.time()
         detection_in.send(nn_data)
