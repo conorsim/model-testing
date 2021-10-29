@@ -9,6 +9,9 @@ import depthai as dai
 import numpy as np
 
 import time
+import os
+
+import zipfile
 
 # Get Argument First
 parser = argparse.ArgumentParser()
@@ -28,19 +31,23 @@ print(args)
 # Start defining a pipeline
 pipeline = dai.Pipeline()
 
+# Downloading model
+model_path = blobconverter.from_zoo(name=args.model_name,
+                                    zoo_type=args.zoo_type,
+                                    shaves=args.shaves,
+                                    use_cache = args.cache)
+
 # NeuralNetwork
 print("Creating Neural Network...")
 detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath(str(blobconverter.from_zoo(name=args.model_name, zoo_type=args.zoo_type,
-                                                    shaves=args.shaves, use_cache = args.cache)))
+detection_nn.setBlobPath(str(model_path))
 detection_nn.setNumInferenceThreads(1)
 detection_nn.input.setBlocking(True)
-#detection_nn.out.setBlocking(True)
 
 nn_in = pipeline.createXLinkIn()
+nn_in.setMaxDataSize(6609600)
 nn_in.setStreamName("in_nn")
 nn_in.out.link(detection_nn.input)
-#nn_in.out.setBlocking(True)
 
 # Create outputs
 xout_nn = pipeline.createXLinkOut()
@@ -61,15 +68,17 @@ with dai.Device(pipeline) as device:
 
         # feed 55 messages
         for i in range(25):
-            if not args.fp16:
-                frame = np.random.randint(256, size=args.input_shape, dtype=int)
-                nn_data = dai.NNData()
-                nn_data.setLayer("input", frame)
+            frame = np.random.randint(256, size=args.input_shape, dtype=np.uint8)
+            nn_data = dai.NNData()
+
+            if "super-resolution" in args.model_name:
+                nn_data.setLayer("0", frame)
+                frame = np.transpose(frame, (1, 2, 0))
+                frame = cv2.resize(frame, (args.input_shape[2] * 4, args.input_shape[1] * 4), cv2.INTER_LINEAR)
+                frame = np.transpose(frame, (2, 0, 1))
+                nn_data.setLayer("1", frame)
             else:
-                frame = np.random.rand(*args.input_shape)
-                frame = frame.astype(np.float16).flatten().tolist()
-                nn_data = dai.Buffer()
-                nn_data.setData(frame)
+                nn_data.setLayer("input", frame)
 
             detection_in.send(nn_data)
 
