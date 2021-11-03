@@ -1,140 +1,144 @@
 #!/usr/bin/env python3
-import argparse
+
+"""
+The code is the same as for Tiny Yolo V3 and V4, the only difference is the blob file
+- Tiny YOLOv3: https://github.com/david8862/keras-YOLOv3-model-set
+- Tiny YOLOv4: https://github.com/TNTWEN/OpenVINO-YOLOV4
+"""
+
 from pathlib import Path
 import sys
-
-import blobconverter
 import cv2
 import depthai as dai
 import numpy as np
-from depthai_sdk import FPSHandler
-from functions import non_max_suppression, draw_boxes
-
 import time
+import blobconverter
+from depthai_sdk import FPSHandler
 
-# Get Argument First
+import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('-cam', '--camera', action="store_true", help="Use DepthAI 4K RGB camera for inference (conflicts with -vid)")
 parser.add_argument('-vid', '--video', type=str, help="Path to video file to be used for inference (conflicts with -cam)")
 parser.add_argument('-s', '--shaves', type=int, default=6, help="Number of shaves to use for blob")
 args = parser.parse_args()
 
-# NOTE: video must be of size 224 x 224. We will resize this on the
-# host, but you could also use ImageManip node to do it on device
+# Get argument first
+# nnPath = str((Path(__file__).parent / Path('../models/yolo-v3-tiny-tf_openvino_2021.4_6shave.blob')).resolve().absolute())
+nnPath = str(blobconverter.from_zoo(name="yolo-v3-tiny-tf", shaves=args.shaves))
 
-# Link video in with the detection network
+if not Path(nnPath).exists():
+    import sys
+    raise FileNotFoundError(f'Required file/s not found, please run "{sys.executable} install_requirements.py"')
 
-if not args.camera and not args.video:
-    raise RuntimeError("No source selected. Please use either \"-cam\" to use RGB camera as a source or \"-vid <path>\" to run on video")
+# tiny yolo v4 label texts
+labelMap = [
+    "person",         "bicycle",    "car",           "motorbike",     "aeroplane",   "bus",           "train",
+    "truck",          "boat",       "traffic light", "fire hydrant",  "stop sign",   "parking meter", "bench",
+    "bird",           "cat",        "dog",           "horse",         "sheep",       "cow",           "elephant",
+    "bear",           "zebra",      "giraffe",       "backpack",      "umbrella",    "handbag",       "tie",
+    "suitcase",       "frisbee",    "skis",          "snowboard",     "sports ball", "kite",          "baseball bat",
+    "baseball glove", "skateboard", "surfboard",     "tennis racket", "bottle",      "wine glass",    "cup",
+    "fork",           "knife",      "spoon",         "bowl",          "banana",      "apple",         "sandwich",
+    "orange",         "broccoli",   "carrot",        "hot dog",       "pizza",       "donut",         "cake",
+    "chair",          "sofa",       "pottedplant",   "bed",           "diningtable", "toilet",        "tvmonitor",
+    "laptop",         "mouse",      "remote",        "keyboard",      "cell phone",  "microwave",     "oven",
+    "toaster",        "sink",       "refrigerator",  "book",          "clock",       "vase",          "scissors",
+    "teddy bear",     "hair drier", "toothbrush"
+]
 
-camera = not args.video
+syncNN = True
 
-# Start defining a pipeline
+# Create pipeline
 pipeline = dai.Pipeline()
 
-# NeuralNetwork
-print("Creating Neural Network...")
-detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath(str(blobconverter.from_zoo(name="yolo-v3-tiny-tf", shaves=args.shaves)))
-detection_nn.setNumInferenceThreads(1)
+# Define sources and outputs
+camRgb = pipeline.create(dai.node.ColorCamera)
+detectionNetwork = pipeline.create(dai.node.YoloDetectionNetwork)
+xoutRgb = pipeline.create(dai.node.XLinkOut)
+nnOut = pipeline.create(dai.node.XLinkOut)
 
-if camera:
-    print("Creating Color Camera...")
-    cam_rgb = pipeline.createColorCamera()
-    cam_rgb.setPreviewSize(416, 416)
-    cam_rgb.setInterleaved(False)
-    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
-    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
+xoutRgb.setStreamName("rgb")
+nnOut.setStreamName("nn")
 
-    cam_xout = pipeline.createXLinkOut()
-    cam_xout.setStreamName("rgb")
-    cam_rgb.preview.link(cam_xout.input)
-    cam_rgb.preview.link(detection_nn.input)
+# Properties
+camRgb.setPreviewSize(416, 416)
+camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+camRgb.setInterleaved(False)
+camRgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+camRgb.setFps(40)
+
+# Network specific settings
+detectionNetwork.setConfidenceThreshold(0.5)
+detectionNetwork.setNumClasses(80)
+detectionNetwork.setCoordinateSize(4)
+detectionNetwork.setAnchors(np.array([10, 14, 23, 27, 37, 58, 81, 82, 135, 169, 344, 319]))
+detectionNetwork.setAnchorMasks({"side26": np.array([1, 2, 3]), "side13": np.array([3, 4, 5])})
+detectionNetwork.setIouThreshold(0.5)
+detectionNetwork.setBlobPath(nnPath)
+detectionNetwork.setNumInferenceThreads(2)
+detectionNetwork.input.setBlocking(False)
+
+# Linking
+camRgb.preview.link(detectionNetwork.input)
+if syncNN:
+    detectionNetwork.passthrough.link(xoutRgb.input)
 else:
-    face_in = pipeline.createXLinkIn()
-    face_in.setStreamName("in_nn")
-    face_in.out.link(detection_nn.input)
+    camRgb.preview.link(xoutRgb.input)
 
-# Create outputs
-xout_nn = pipeline.createXLinkOut()
-xout_nn.setStreamName("nn")
-detection_nn.out.link(xout_nn.input)
+detectionNetwork.out.link(nnOut.input)
 
-frame = None
-bboxes = []
-
-
-def to_planar(arr: np.ndarray, shape: tuple) -> np.ndarray:
-        resized = cv2.resize(arr, shape)
-        return resized.transpose(2, 0, 1)
-
-
-# Pipeline defined, now the device is assigned and pipeline is started
+# Connect to device and start pipeline
 with dai.Device(pipeline) as device:
 
     # Output queues will be used to get the rgb frames and nn data from the outputs defined above
-    if camera:
-        q_rgb = device.getOutputQueue(name="rgb", maxSize=1, blocking=True)
-        fps = FPSHandler(maxTicks=2)
-    else:
-        cap = cv2.VideoCapture(str(Path(args.video).resolve().absolute()))
-        fps = FPSHandler(cap, maxTicks=2)
+    qRgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+    qDet = device.getOutputQueue(name="nn", maxSize=4, blocking=False)
+    fps = FPSHandler(maxTicks=2)
 
-        detection_in = device.getInputQueue("in_nn")
-    q_nn = device.getOutputQueue(name="nn", maxSize=1, blocking=True)
+    frame = None
+    detections = []
+    startTime = time.monotonic()
+    counter = 0
+    color2 = (255, 255, 255)
 
+    # nn data, being the bounding box locations, are in <0..1> range - they need to be normalized with frame width/height
+    def frameNorm(frame, bbox):
+        normVals = np.full(len(bbox), frame.shape[0])
+        normVals[::2] = frame.shape[1]
+        return (np.clip(np.array(bbox), 0, 1) * normVals).astype(int)
 
-    def should_run():
-        return cap.isOpened() if args.video else True
+    def displayFrame(name, frame):
+        color = (255, 0, 0)
+        for detection in detections:
+            bbox = frameNorm(frame, (detection.xmin, detection.ymin, detection.xmax, detection.ymax))
+            cv2.putText(frame, labelMap[detection.label], (bbox[0] + 10, bbox[1] + 20), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            cv2.putText(frame, f"{int(detection.confidence * 100)}%", (bbox[0] + 10, bbox[1] + 40), cv2.FONT_HERSHEY_TRIPLEX, 0.5, 255)
+            cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+        # Show the frame
+        cv2.imshow(name, frame)
 
-
-    def get_frame():
-        if camera:
-            in_rgb = q_rgb.get()
-            new_frame = np.array(in_rgb.getData()).reshape((3, in_rgb.getHeight(), in_rgb.getWidth())).transpose(1, 2, 0).astype(np.uint8)
-            new_frame = cv2.cvtColor(new_frame, cv2.COLOR_BGR2RGB)
-            return True, np.ascontiguousarray(new_frame)
-        else:
-            return cap.read()
-
-
-
-    result = None
-
-    while should_run():
-
-        read_correctly, frame = get_frame()
-
-        if not read_correctly:
-            break
-
+    while True:
         fps.tick("test")
 
-        if not camera:
-            nn_data = dai.NNData()
-            nn_data.setLayer("input", to_planar(frame, (416, 416)))
-            detection_in.send(nn_data)
+        if syncNN:
+            inRgb = qRgb.get()
+            inDet = qDet.get()
+        else:
+            inRgb = qRgb.tryGet()
+            inDet = qDet.tryGet()
 
-        in_nn = q_nn.get()
+        if inRgb is not None:
+            frame = inRgb.getCvFrame()
+            # cv2.putText(frame, "NN fps: {:.2f}".format(counter / (time.monotonic() - startTime)),
+            #             (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color2)
 
-        output = np.array(in_nn.getFirstLayerFp16())
+        if inDet is not None:
+            detections = inDet.detections
+            counter += 1
 
-        # reshape to proper format
-        cols = output.shape[0]//28730
-        output = np.reshape(output, (28730, cols))
-        output = np.expand_dims(output, axis = 0)
+        if frame is not None:
+            displayFrame("rgb", frame)
 
-        total_classes = cols - 5
-
-        boxes = non_max_suppression(output, conf_thres=0.2, iou_thres=0.6)
-        boxes = np.array(boxes[0])
-        # frame_main = frame.copy()
-        if boxes is not None:
-            frame = draw_boxes(frame, boxes, total_classes)
-
-        # print(fps.tickFps("test"))
-        cv2.imshow("rgb", cv2.resize(frame, (400, 400)))
-
+        print(fps.tickFps("test"))
         if cv2.waitKey(1) == ord('q'):
             break

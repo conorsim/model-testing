@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+"""
+Another method of decoding YOLOv3 outputs. Not recommended to use during testing.
+"""
+
 import argparse
 from pathlib import Path
 import sys
@@ -7,8 +12,8 @@ import blobconverter
 import cv2
 import depthai as dai
 import numpy as np
-from classes import class_names
 from depthai_sdk import FPSHandler
+from functions import non_max_suppression, draw_boxes
 
 import time
 
@@ -19,8 +24,6 @@ parser.add_argument('-vid', '--video', type=str, help="Path to video file to be 
 parser.add_argument('-s', '--shaves', type=int, default=6, help="Number of shaves to use for blob")
 args = parser.parse_args()
 
-
-
 # NOTE: video must be of size 224 x 224. We will resize this on the
 # host, but you could also use ImageManip node to do it on device
 
@@ -30,22 +33,32 @@ if not args.camera and not args.video:
     raise RuntimeError("No source selected. Please use either \"-cam\" to use RGB camera as a source or \"-vid <path>\" to run on video")
 
 camera = not args.video
-labels = class_names()
-
 
 # Start defining a pipeline
 pipeline = dai.Pipeline()
 
 # NeuralNetwork
 print("Creating Neural Network...")
-detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath(str(blobconverter.from_zoo(name="unet-camvid-onnx-0001", shaves=args.shaves)))
-detection_nn.setNumInferenceThreads(1)
+# detection_nn = pipeline.createNeuralNetwork()
+# detection_nn.setBlobPath(str(blobconverter.from_zoo(name="yolo-v3-tiny-tf", shaves=args.shaves)))
+# detection_nn = pipeline.create(dai.node.YoloDetectionNetwork)
+# detection_nn.setNumInferenceThreads(1)
+
+yoloDet = pipeline.create(dai.node.YoloDetectionNetwork)
+yoloDet.setBlobPath(str(blobconverter.from_zoo(name="yolo-v3-tiny-tf", shaves=args.shaves)))
+
+# Yolo specific parameters
+yoloDet.setConfidenceThreshold(0.5)
+yoloDet.setNumClasses(80)
+yoloDet.setCoordinateSize(4)
+yoloDet.setAnchors(np.array([10,14, 23,27, 37,58, 81,82, 135,169, 344,319]))
+yoloDet.setAnchorMasks({"side26": np.array([1, 2, 3]), "side13": np.array([3, 4, 5])})
+yoloDet.setIouThreshold(0.5)
 
 if camera:
     print("Creating Color Camera...")
     cam_rgb = pipeline.createColorCamera()
-    cam_rgb.setPreviewSize(480, 368)
+    cam_rgb.setPreviewSize(416, 416)
     cam_rgb.setInterleaved(False)
     cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
@@ -54,33 +67,19 @@ if camera:
     cam_xout = pipeline.createXLinkOut()
     cam_xout.setStreamName("rgb")
     cam_rgb.preview.link(cam_xout.input)
-    cam_rgb.preview.link(detection_nn.input)
+    cam_rgb.preview.link(yoloDet.input)
 else:
     face_in = pipeline.createXLinkIn()
     face_in.setStreamName("in_nn")
-    face_in.out.link(detection_nn.input)
+    face_in.out.link(yoloDet.input)
 
 # Create outputs
 xout_nn = pipeline.createXLinkOut()
 xout_nn.setStreamName("nn")
-detection_nn.out.link(xout_nn.input)
+yoloDet.out.link(xout_nn.input)
 
 frame = None
 bboxes = []
-
-
-def get_mask(x, total_classes):
-    x = np.argmax(x, axis = 0)
-    x = x * 255 / total_classes
-    x = x.astype(np.uint8)
-    output_colors = cv2.applyColorMap(x, cv2.COLORMAP_JET)
-
-    # reset the color of 0 class
-    output_colors[x == total_classes - 1] = [0, 0, 0]
-    return output_colors
-
-def show_overlay(frame, output_colors):
-    return cv2.addWeighted(frame,0.65, output_colors,0.35,0)
 
 
 def to_planar(arr: np.ndarray, shape: tuple) -> np.ndarray:
@@ -94,10 +93,10 @@ with dai.Device(pipeline) as device:
     # Output queues will be used to get the rgb frames and nn data from the outputs defined above
     if camera:
         q_rgb = device.getOutputQueue(name="rgb", maxSize=1, blocking=True)
-        fps_handler = FPSHandler(maxTicks=2)
+        fps = FPSHandler(maxTicks=2)
     else:
         cap = cv2.VideoCapture(str(Path(args.video).resolve().absolute()))
-        fps_handler = FPSHandler(cap, maxTicks=2)
+        fps = FPSHandler(cap, maxTicks=2)
 
         detection_in = device.getInputQueue("in_nn")
     q_nn = device.getOutputQueue(name="nn", maxSize=1, blocking=True)
@@ -127,25 +126,31 @@ with dai.Device(pipeline) as device:
         if not read_correctly:
             break
 
-        fps_handler.tick("test")
+        fps.tick("test")
 
         if not camera:
             nn_data = dai.NNData()
-            nn_data.setLayer("input", to_planar(frame, (480, 368)))
+            nn_data.setLayer("input", to_planar(frame, (416, 416)))
             detection_in.send(nn_data)
 
         in_nn = q_nn.get()
+        detections = in_nn.detections
+        print(detections)
 
-        output = np.array(in_nn.getFirstLayerFp16()).reshape(12, 368, 480)
-        result = get_mask(output, 12)
+        # reshape to proper format
+        # cols = output.shape[0]//28730
+        # output = np.reshape(output, (28730, cols))
+        # output = np.expand_dims(output, axis = 0)
 
-        frame_main = frame.copy()
-        frame_main = show_overlay(frame_main, result)
+        # total_classes = cols - 5
 
-        fps = fps_handler.tickFps("test")
-        cv2.putText(frame_main, "Fps: {:.2f}".format(fps), (2, frame.shape[0] - 4), cv2.FONT_HERSHEY_TRIPLEX, 0.4, color=(255, 255, 255))
-        cv2.imshow("rgb", cv2.resize(frame_main, (480, 368)))
+        boxes = non_max_suppression(output, conf_thres=0.5, iou_thres=0.6)
+        boxes = np.array(boxes[0])
+        if boxes is not None:
+            frame = draw_boxes(frame, boxes, total_classes)
 
-        print(fps_handler.tickFps("test"))
+        print(fps.tickFps("test"))
+        cv2.imshow("rgb", cv2.resize(frame, (400, 400)))
+
         if cv2.waitKey(1) == ord('q'):
             break

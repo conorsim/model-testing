@@ -59,7 +59,6 @@ else:
     fps = FPSHandler(cap, maxTicks=2)
 
 nn = nm.createNN(pm.pipeline, pm.nodes, source=Previews.color.name if args.camera else "host", blobPath=Path(str(blobconverter.from_zoo(name="human-pose-estimation-0001", shaves=args.shaves))), fullFov=True)
-# nn.setBlobPath(str(blobconverter.from_zoo(name="efficientnet-b0", shaves=args.shaves)))
 pm.addNn(nn=nn)
 
 def decode_thread(in_queue):
