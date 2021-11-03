@@ -39,7 +39,7 @@ pipeline = dai.Pipeline()
 # NeuralNetwork
 print("Creating Neural Network...")
 detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath("inception_v4_inf_graph_openvino_2021.4_6shave.blob")
+detection_nn.setBlobPath(str(blobconverter.from_zoo(name="inceptionv4_299x299", zoo_type="depthai", shaves=args.shaves)))
 detection_nn.setNumInferenceThreads(1)
 
 if camera:
