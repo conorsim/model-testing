@@ -41,11 +41,10 @@ model_path = blobconverter.from_zoo(name=args.model_name,
 print("Creating Neural Network...")
 detection_nn = pipeline.createNeuralNetwork()
 detection_nn.setBlobPath(str(model_path))
-detection_nn.setNumInferenceThreads(1)
+detection_nn.setNumInferenceThreads(2)
 detection_nn.input.setBlocking(True)
 
 nn_in = pipeline.createXLinkIn()
-nn_in.setMaxDataSize(6609600)
 nn_in.setStreamName("in_nn")
 nn_in.out.link(detection_nn.input)
 
