@@ -20,7 +20,6 @@ parser.add_argument('-s', '--shaves', type=int, default=6, help="Number of shave
 args = parser.parse_args()
 
 
-
 # NOTE: video must be of size 224 x 224. We will resize this on the
 # host, but you could also use ImageManip node to do it on device
 
@@ -39,7 +38,7 @@ pipeline = dai.Pipeline()
 # NeuralNetwork
 print("Creating Neural Network...")
 detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath(str(blobconverter.from_zoo(name="resnet-50-tf", shaves=args.shaves)))
+detection_nn.setBlobPath(str(blobconverter.from_zoo(name="shufflenetv2_224x224", zoo_type="depthai", shaves=args.shaves)))
 detection_nn.setNumInferenceThreads(2)
 
 if camera:

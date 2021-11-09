@@ -40,7 +40,7 @@ pipeline = dai.Pipeline()
 print("Creating Neural Network...")
 detection_nn = pipeline.createNeuralNetwork()
 detection_nn.setBlobPath(str(blobconverter.from_zoo(name="unet-camvid-onnx-0001", shaves=args.shaves)))
-detection_nn.setNumInferenceThreads(1)
+detection_nn.setNumInferenceThreads(2)
 
 if camera:
     print("Creating Color Camera...")

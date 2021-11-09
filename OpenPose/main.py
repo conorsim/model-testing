@@ -24,16 +24,6 @@ if not args.camera and not args.video:
 debug = not args.no_debug
 device_info = getDeviceInfo()
 
-# if args.camera:
-#     blob_path = "models/human-pose-estimation-0001_openvino_2021.2_6shave.blob"
-# else:
-#     blob_path = "models/human-pose-estimation-0001_openvino_2021.2_8shave.blob"
-#     if str(args.video).startswith('https'):
-#         args.video = downloadYTVideo(str(args.video))
-#         print("Youtube video downloaded.")
-#     if not Path(args.video).exists():
-#         raise ValueError("Path {} does not exists!".format(args.video))
-
 
 colors = [[0, 100, 255], [0, 100, 255], [0, 255, 255], [0, 100, 255], [0, 255, 255], [0, 100, 255], [0, 255, 0],
           [255, 200, 100], [255, 0, 255], [0, 255, 0], [255, 200, 100], [255, 0, 255], [0, 0, 255], [255, 0, 0],
@@ -59,6 +49,7 @@ else:
     fps = FPSHandler(cap, maxTicks=2)
 
 nn = nm.createNN(pm.pipeline, pm.nodes, source=Previews.color.name if args.camera else "host", blobPath=Path(str(blobconverter.from_zoo(name="human-pose-estimation-0001", shaves=args.shaves))), fullFov=True)
+nn.setNumInferenceThreads(2)
 pm.addNn(nn=nn)
 
 def decode_thread(in_queue):
