@@ -45,6 +45,7 @@ if camera:
     cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
+    cam_rgb.setFps(1)
 
     nn_xout = pipeline.createXLinkOut()
     nn_xout.setStreamName("out_nn")
