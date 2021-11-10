@@ -38,7 +38,7 @@ pipeline = dai.Pipeline()
 # NeuralNetwork
 print("Creating Neural Network...")
 detection_nn = pipeline.createNeuralNetwork()
-detection_nn.setBlobPath(str(blobconverter.from_zoo(name="shufflenetv2_224x224", zoo_type="depthai", shaves=args.shaves)))
+detection_nn.setBlobPath(str(blobconverter.from_zoo(name="shufflenetv2_224x224", zoo_type="depthai", shaves=args.shaves, use_cache = False)))
 detection_nn.setNumInferenceThreads(2)
 
 if camera:
@@ -84,14 +84,14 @@ with dai.Device(pipeline) as device:
 
     # Output queues will be used to get the rgb frames and nn data from the outputs defined above
     if camera:
-        q_rgb = device.getOutputQueue(name="rgb", maxSize=1, blocking=True)
+        q_rgb = device.getOutputQueue(name="rgb", maxSize=20, blocking=True)
         fps = FPSHandler(maxTicks=2)
     else:
         cap = cv2.VideoCapture(str(Path(args.video).resolve().absolute()))
         fps = FPSHandler(cap, maxTicks=2)
 
         detection_in = device.getInputQueue("in_nn")
-    q_nn = device.getOutputQueue(name="nn", maxSize=1, blocking=True)
+    q_nn = device.getOutputQueue(name="nn", maxSize=20, blocking=True)
 
 
     def should_run():
