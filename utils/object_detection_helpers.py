@@ -130,12 +130,13 @@ def nms(boxes, conf_thresh=0.1, iou_thresh=0.6):
         best_box = boxes[idx, -4:]
         cs = np.delete(cs, [idx])
         boxes = np.delete(boxes, [idx], axis=0)
+        idxs = []
         for i in range(boxes.shape[0]):
             cmp_box = boxes[i, -4:]
             IOU = iou(best_box, cmp_box)
             if IOU > iou_thresh:
-                cs = np.delete(cs, [i])
-                boxes = np.delete(boxes, [i], axis=0)
-                break
+                idxs.append(i)
+        cs = np.delete(cs, [idxs])
+        boxes = np.delete(boxes, [idxs], axis=0)
 
     return np.array(keep)
