@@ -21,6 +21,7 @@ parser.add_argument('-zoo', '--zoo_type', type=str, default=None, help="Zoo type
 parser.add_argument('-shape', '--input_shape', type=int, nargs='+', help="List of ints", required=True)
 parser.add_argument('-fp16', '--fp16', action="store_true", help="Input must be FP16")
 parser.add_argument('-c', '--cache', action="store_true", help="Use cache with blobconverter.")
+parser.add_argument('-b', '--blob', type=str, help="If specified, blob will be used.")
 
 args = parser.parse_args()
 
@@ -32,10 +33,14 @@ print(args)
 pipeline = dai.Pipeline()
 
 # Downloading model
-model_path = blobconverter.from_zoo(name=args.model_name,
-                                    zoo_type=args.zoo_type,
-                                    shaves=args.shaves,
-                                    use_cache = args.cache)
+if args.blob is None:
+    model_path = blobconverter.from_zoo(name=args.model_name,
+                                        zoo_type=args.zoo_type,
+                                        shaves=args.shaves,
+                                        use_cache = args.cache,
+                                        version = blobconverter.Versions.v2021_4)
+else:
+    model_path = args.blob
 
 # NeuralNetwork
 print("Creating Neural Network...")
@@ -45,6 +50,7 @@ detection_nn.setNumInferenceThreads(2)
 detection_nn.input.setBlocking(True)
 
 nn_in = pipeline.createXLinkIn()
+nn_in.setMaxDataSize(6291456)
 nn_in.setStreamName("in_nn")
 nn_in.out.link(detection_nn.input)
 
